@@ -17,30 +17,47 @@ if [[ -n "$HOMEBREW_MACOS" ]]
 then
   if [[ "$HOMEBREW_PROCESSOR" = "Intel" ]]
   then
-    ruby_URL="$HOMEBREW_BOTTLE_DOMAIN/bottles-portable-ruby/portable-ruby-2.6.3.mavericks.bottle.tar.gz"
-    ruby_URL2="https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.3/portable-ruby-2.6.3.mavericks.bottle.tar.gz"
-    ruby_SHA="ab81211a2052ccaa6d050741c433b728d0641523d8742eef23a5b450811e5104"
+    ruby_URL="$HOMEBREW_BOTTLE_DOMAIN/bottles-portable-ruby/portable-ruby-2.6.3_2.yosemite.bottle.tar.gz"
+    ruby_URL2="https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.3_2/portable-ruby-2.6.3_2.yosemite.bottle.tar.gz"
+    ruby_SHA="b065e5e3783954f3e65d8d3a6377ca51649bfcfa21b356b0dd70490f74c6bd86"
   fi
 elif [[ -n "$HOMEBREW_LINUX" ]]
 then
   case "$HOMEBREW_PROCESSOR" in
     x86_64)
-      ruby_URL="$HOMEBREW_BOTTLE_DOMAIN/bottles-portable-ruby/portable-ruby-2.6.3.x86_64_linux.bottle.tar.gz"
-      ruby_URL2="https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.3/portable-ruby-2.6.3.x86_64_linux.bottle.tar.gz"
-      ruby_SHA="e8c9b6d3dc5f40844e07b4b694897b8b7cb5a7dab1013b3b8712a22868f98c98"
-      ;;
-    aarch64)
-      ruby_URL="$HOMEBREW_BOTTLE_DOMAIN/bottles-portable-ruby/portable-ruby-2.6.3.aarch64_linux.bottle.tar.gz"
-      ruby_URL2="https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.3/portable-ruby-2.6.3.aarch64_linux.bottle.tar.gz"
-      ruby_SHA="c0b08e2835897af74948508a004d30380b8bcf14264e0dcce194e2c199fb1e35"
-      ;;
-    armv[67]*)
-      ruby_URL="$HOMEBREW_BOTTLE_DOMAIN/bottles-portable-ruby/portable-ruby-2.6.3.armv6_linux.bottle.tar.gz"
-      ruby_URL2="https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.3/portable-ruby-2.6.3.armv6_linux.bottle.tar.gz"
-      ruby_SHA="78e36e4671fd08790bfbfda4408d559341c9872bf48a4f6eab78157a3bf3efa6"
+      ruby_URL="$HOMEBREW_BOTTLE_DOMAIN/bottles-portable-ruby/portable-ruby-2.6.3_2.x86_64_linux.bottle.tar.gz"
+      ruby_URL2="https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.3_2/portable-ruby-2.6.3_2.x86_64_linux.bottle.tar.gz"
+      ruby_SHA="97e639a64dcec285392b53ad804b5334c324f1d2a8bdc2b5087b8bf8051e332f"
       ;;
   esac
 fi
+
+check_linux_glibc_version() {
+  if [[ -z $HOMEBREW_LINUX || -z $HOMEBREW_LINUX_MINIMUM_GLIBC_VERSION ]]
+  then
+    return 0
+  fi
+
+  local glibc_version
+  local glibc_version_major
+  local glibc_version_minor
+
+  local minimum_required_major=${HOMEBREW_LINUX_MINIMUM_GLIBC_VERSION%.*}
+  local minimum_required_minor=${HOMEBREW_LINUX_MINIMUM_GLIBC_VERSION#*.}
+
+  if [[ $(/usr/bin/ldd --version) =~ \ [0-9]\.[0-9]+ ]]
+  then
+    glibc_version=${BASH_REMATCH[0]// /}
+    glibc_version_major=${glibc_version%.*}
+    glibc_version_minor=${glibc_version#*.}
+    if (( glibc_version_major < minimum_required_major || glibc_version_minor < minimum_required_minor ))
+    then
+      odie "Vendored tools require system Glibc $HOMEBREW_LINUX_MINIMUM_GLIBC_VERSION or later (yours is $glibc_version)."
+    fi
+  else
+    odie "Failed to detect system Glibc version."
+  fi
+}
 
 # Execute the specified command, and suppress stderr unless HOMEBREW_STDERR is set.
 quiet_stderr() {
@@ -116,7 +133,7 @@ fetch() {
       odie <<EOS
 Failed to download $VENDOR_URL and $VENDOR_URL2!
 
-Do not file an issue on GitHub about this: you will need to figure out for
+Do not file an issue on GitHub about this; you will need to figure out for
 yourself what issue with your internet connection restricts your access to
 both Bintray (used for Homebrew bottles/binary packages) and GitHub
 (used for Homebrew updates).
@@ -230,6 +247,7 @@ homebrew-vendor-install() {
 
   [[ -z "$VENDOR_NAME" ]] && odie "This command requires a vendor target!"
   [[ -n "$HOMEBREW_DEBUG" ]] && set -x
+  check_linux_glibc_version
 
   url_var="${VENDOR_NAME}_URL"
   url2_var="${VENDOR_NAME}_URL2"

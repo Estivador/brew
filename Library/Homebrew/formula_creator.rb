@@ -1,12 +1,22 @@
+# typed: true
 # frozen_string_literal: true
 
 require "digest"
 require "erb"
 
 module Homebrew
+  # Class for generating a formula from a template.
+  #
+  # @api private
   class FormulaCreator
-    attr_reader :url, :sha256, :desc, :homepage
-    attr_accessor :name, :version, :tap, :path, :mode
+    extend T::Sig
+
+    attr_reader :args, :url, :sha256, :desc, :homepage
+    attr_accessor :name, :version, :tap, :path, :mode, :license
+
+    def initialize(args)
+      @args = args
+    end
 
     def url=(url)
       @url = url
@@ -30,7 +40,7 @@ module Homebrew
       @version = if @version
         Version.create(@version)
       else
-        Version.detect(url, {})
+        Version.detect(url)
       end
     end
 
@@ -41,11 +51,11 @@ module Homebrew
     end
 
     def fetch?
-      !Homebrew.args.no_fetch?
+      !args.no_fetch?
     end
 
     def head?
-      @head || Homebrew.args.HEAD?
+      @head || args.HEAD?
     end
 
     def generate!
@@ -68,6 +78,7 @@ module Homebrew
             metadata = GitHub.repository(@user, @name)
             @desc = metadata["description"]
             @homepage = metadata["homepage"]
+            @license = metadata["license"]["spdx_id"] if metadata["license"]
           rescue GitHub::HTTPNotFoundError
             # If there was no repository found assume the network connection is at
             # fault rather than the input URL.
@@ -79,11 +90,16 @@ module Homebrew
       path.write ERB.new(template, trim_mode: ">").result(binding)
     end
 
+    sig { returns(String) }
     def template
       <<~ERB
         # Documentation: https://docs.brew.sh/Formula-Cookbook
         #                https://rubydoc.brew.sh/Formula
         # PLEASE REMOVE ALL GENERATED COMMENTS BEFORE SUBMITTING YOUR PULL REQUEST!
+        <% if mode == :node %>
+        require "language/node"
+
+        <% end %>
         class #{Formulary.class_s(name)} < Formula
         <% if mode == :python %>
           include Language::Python::Virtualenv
@@ -91,23 +107,29 @@ module Homebrew
         <% end %>
           desc "#{desc}"
           homepage "#{homepage}"
-        <% if head? %>
-          head "#{url}"
-        <% else %>
+        <% unless head? %>
           url "#{url}"
         <% unless version.nil? or version.detected_from_url? %>
           version "#{version}"
         <% end %>
           sha256 "#{sha256}"
         <% end %>
+          license "#{license}"
+        <% if head? %>
+          head "#{url}"
+        <% end %>
 
         <% if mode == :cmake %>
           depends_on "cmake" => :build
+        <% elsif mode == :crystal %>
+          depends_on "crystal" => :build
         <% elsif mode == :go %>
           depends_on "go" => :build
         <% elsif mode == :meson %>
           depends_on "meson" => :build
           depends_on "ninja" => :build
+        <% elsif mode == :node %>
+          depends_on "node"
         <% elsif mode == :perl %>
           uses_from_macos "perl"
         <% elsif mode == :python %>
@@ -120,7 +142,7 @@ module Homebrew
           # depends_on "cmake" => :build
         <% end %>
 
-        <% if mode == :perl || mode == :python %>
+        <% if mode == :perl %>
           # Additional dependency
           # resource "" do
           #   url ""
@@ -138,6 +160,9 @@ module Homebrew
                                   "--disable-dependency-tracking",
                                   "--disable-silent-rules",
                                   "--prefix=\#{prefix}"
+        <% elsif mode == :crystal %>
+            system "shards", "build", "--release"
+            bin.install "bin/#{name}"
         <% elsif mode == :go %>
             system "go", "build", *std_go_args
         <% elsif mode == :meson %>
@@ -146,6 +171,9 @@ module Homebrew
               system "ninja", "-v"
               system "ninja", "install", "-v"
             end
+        <% elsif mode == :node %>
+            system "npm", "install", *Language::Node.std_npm_install_args(libexec)
+            bin.install_symlink Dir["\#{libexec}/bin/*"]
         <% elsif mode == :perl %>
             ENV.prepend_create_path "PERL5LIB", libexec/"lib/perl5"
             ENV.prepend_path "PERL5LIB", libexec/"lib"
@@ -165,7 +193,7 @@ module Homebrew
             # end
 
             bin.install name
-            bin.env_script_all_files(libexec/"bin", :PERL5LIB => ENV["PERL5LIB"])
+            bin.env_script_all_files(libexec/"bin", PERL5LIB: ENV["PERL5LIB"])
         <% elsif mode == :python %>
             virtualenv_install_with_resources
         <% elsif mode == :ruby %>
@@ -173,9 +201,9 @@ module Homebrew
             system "gem", "build", "\#{name}.gemspec"
             system "gem", "install", "\#{name}-\#{version}.gem"
             bin.install libexec/"bin/\#{name}"
-            bin.env_script_all_files(libexec/"bin", :GEM_HOME => ENV["GEM_HOME"])
+            bin.env_script_all_files(libexec/"bin", GEM_HOME: ENV["GEM_HOME"])
         <% elsif mode == :rust %>
-            system "cargo", "install", "--locked", "--root", prefix, "--path", "."
+            system "cargo", "install", *std_cargo_args
         <% else %>
             # Remove unrecognized options if warned by configure
             system "./configure", "--disable-debug",

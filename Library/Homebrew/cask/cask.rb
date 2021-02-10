@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 require "cask/cask_loader"
@@ -7,19 +8,24 @@ require "cask/metadata"
 require "searchable"
 
 module Cask
+  # An instance of a cask.
+  #
+  # @api private
   class Cask
+    extend T::Sig
+
     extend Enumerable
     extend Forwardable
     extend Searchable
     include Metadata
 
-    attr_reader :token, :sourcefile_path, :config
+    attr_reader :token, :sourcefile_path, :config, :default_config
 
-    def self.each
-      return to_enum unless block_given?
+    def self.each(&block)
+      return to_enum unless block
 
       Tap.flat_map(&:cask_files).each do |f|
-        yield CaskLoader::FromTapPathLoader.new(f).load
+        block.call CaskLoader::FromTapPathLoader.new(f).load(config: nil)
       rescue CaskUnreadableError => e
         opoo e.message
       end
@@ -31,12 +37,19 @@ module Cask
       @tap
     end
 
-    def initialize(token, sourcefile_path: nil, tap: nil, &block)
+    def initialize(token, sourcefile_path: nil, tap: nil, config: nil, &block)
       @token = token
       @sourcefile_path = sourcefile_path
       @tap = tap
       @block = block
-      self.config = Config.for_cask(self)
+
+      @default_config = config || Config.new
+
+      self.config = if config_path.exist?
+        Config.from_json(File.read(config_path), ignore_invalid_keys: true)
+      else
+        @default_config
+      end
     end
 
     def config=(config)
@@ -53,6 +66,7 @@ module Cask
       define_method(method_name) { |&block| @dsl.send(method_name, &block) }
     end
 
+    sig { returns(T::Array[[String, String]]) }
     def timestamped_versions
       Pathname.glob(metadata_timestamped_path(version: "*", timestamp: "*"))
               .map { |p| p.relative_path_from(p.parent.parent) }
@@ -78,6 +92,7 @@ module Cask
       !versions.empty?
     end
 
+    sig { returns(T.nilable(Time)) }
     def install_time
       _, time = timestamped_versions.last
       return unless time
@@ -98,11 +113,11 @@ module Cask
       @caskroom_path ||= Caskroom.path.join(token)
     end
 
-    def outdated?(greedy = false)
-      !outdated_versions(greedy).empty?
+    def outdated?(greedy: false)
+      !outdated_versions(greedy: greedy).empty?
     end
 
-    def outdated_versions(greedy = false)
+    def outdated_versions(greedy: false)
       # special case: tap version is not available
       return [] if version.nil?
 
@@ -125,7 +140,7 @@ module Cask
     def outdated_info(greedy, verbose, json)
       return token if !verbose && !json
 
-      installed_versions = outdated_versions(greedy).join(", ")
+      installed_versions = outdated_versions(greedy: greedy).join(", ")
 
       if json
         {
@@ -154,11 +169,16 @@ module Cask
     def to_h
       {
         "token"          => token,
+        "full_token"     => full_name,
+        "tap"            => tap&.name,
         "name"           => name,
+        "desc"           => desc,
         "homepage"       => homepage,
         "url"            => url,
         "appcast"        => appcast,
         "version"        => version,
+        "installed"      => versions.last,
+        "outdated"       => outdated?,
         "sha256"         => sha256,
         "artifacts"      => artifacts.map(&method(:to_h_gsubs)),
         "caveats"        => (to_h_string_gsubs(caveats) unless caveats.empty?),

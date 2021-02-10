@@ -1,29 +1,46 @@
+# typed: true
 # frozen_string_literal: true
 
 require "utils/popen"
 
+# Helper module for querying hardware information.
 module Hardware
+  # Helper module for querying CPU information.
   class CPU
     INTEL_32BIT_ARCHS = [:i386].freeze
     INTEL_64BIT_ARCHS = [:x86_64].freeze
     PPC_32BIT_ARCHS   = [:ppc, :ppc32, :ppc7400, :ppc7450, :ppc970].freeze
     PPC_64BIT_ARCHS   = [:ppc64, :ppc64le, :ppc970].freeze
+    ARM_64BIT_ARCHS   = [:arm64].freeze
+    ALL_ARCHS = [
+      *INTEL_32BIT_ARCHS,
+      *INTEL_64BIT_ARCHS,
+      *PPC_32BIT_ARCHS,
+      *PPC_64BIT_ARCHS,
+      *ARM_64BIT_ARCHS,
+    ].freeze
 
     class << self
+      extend T::Sig
+
       def optimization_flags
         @optimization_flags ||= {
-          native:  arch_flag("native"),
-          nehalem: "-march=nehalem",
-          core2:   "-march=core2",
-          core:    "-march=prescott",
-          armv6:   "-march=armv6",
-          armv8:   "-march=armv8-a",
-          ppc64:   "-mcpu=powerpc64",
-          ppc64le: "-mcpu=powerpc64le",
+          native:             arch_flag("native"),
+          ivybridge:          "-march=ivybridge",
+          sandybridge:        "-march=sandybridge",
+          nehalem:            "-march=nehalem",
+          core2:              "-march=core2",
+          core:               "-march=prescott",
+          arm_vortex_tempest: "",
+          armv6:              "-march=armv6",
+          armv8:              "-march=armv8-a",
+          ppc64:              "-mcpu=powerpc64",
+          ppc64le:            "-mcpu=powerpc64le",
         }.freeze
       end
       alias generic_optimization_flags optimization_flags
 
+      sig { returns(Symbol) }
       def arch_32_bit
         if arm?
           :arm
@@ -36,6 +53,7 @@ module Hardware
         end
       end
 
+      sig { returns(Symbol) }
       def arch_64_bit
         if arm?
           :arm64
@@ -62,9 +80,12 @@ module Hardware
       end
 
       def universal_archs
+        odeprecated "Hardware::CPU.universal_archs"
+
         [arch].extend ArchitectureListExtension
       end
 
+      sig { returns(Symbol) }
       def type
         case RUBY_PLATFORM
         when /x86_64/, /i\d86/ then :intel
@@ -74,6 +95,7 @@ module Hardware
         end
       end
 
+      sig { returns(Symbol) }
       def family
         :dunno
       end
@@ -93,6 +115,7 @@ module Hardware
         end
       end
 
+      sig { returns(T::Boolean) }
       def sse4?
         RUBY_PLATFORM.to_s.include?("x86_64")
       end
@@ -149,6 +172,11 @@ module Hardware
         return "-mcpu=#{arch}" if ppc?
 
         "-march=#{arch}"
+      end
+
+      sig { returns(T::Boolean) }
+      def in_rosetta2?
+        false
       end
     end
   end

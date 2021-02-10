@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 describe Cask::Cask, :cask do
@@ -40,13 +41,13 @@ describe Cask::Cask, :cask do
       expect(c.token).to eq("local-caffeine")
     end
 
-    it "returns an instance of the Cask from a url" do
+    it "returns an instance of the Cask from a URL" do
       c = Cask::CaskLoader.load("file://#{tap_path}/Casks/local-caffeine.rb")
       expect(c).to be_kind_of(described_class)
       expect(c.token).to eq("local-caffeine")
     end
 
-    it "raises an error when failing to download a Cask from a url" do
+    it "raises an error when failing to download a Cask from a URL" do
       expect {
         url = "file://#{tap_path}/Casks/notacask.rb"
 
@@ -134,7 +135,7 @@ describe Cask::Cask, :cask do
         expectations.each do |installed_version, expected_output|
           context "when versions #{installed_version} are installed and the " \
                   "tap version is #{tap_version}, #{"not" unless greedy} greedy" do
-            subject { cask.outdated_versions greedy }
+            subject { cask.outdated_versions(greedy: greedy) }
 
             it {
               allow(cask).to receive(:versions).and_return(installed_version)

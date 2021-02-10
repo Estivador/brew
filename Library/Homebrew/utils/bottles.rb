@@ -1,11 +1,16 @@
+# typed: true
 # frozen_string_literal: true
 
 require "tab"
-require "extend/ARGV"
 
 module Utils
-  class Bottles
+  # Helper functions for bottles.
+  #
+  # @api private
+  module Bottles
     class << self
+      extend T::Sig
+
       def tag
         @tag ||= "#{ENV["HOMEBREW_PROCESSOR"]}_#{ENV["HOMEBREW_SYSTEM"]}".downcase.to_sym
       end
@@ -13,13 +18,13 @@ module Utils
       def built_as?(f)
         return false unless f.latest_version_installed?
 
-        tab = Tab.for_keg(f.installed_prefix)
+        tab = Tab.for_keg(f.latest_installed_prefix)
         tab.built_as_bottle
       end
 
       def file_outdated?(f, file)
         filename = file.basename.to_s
-        return unless f.bottle && filename.match(Pathname::BOTTLE_EXTNAME_RX)
+        return if f.bottle.blank? || !filename.match?(Pathname::BOTTLE_EXTNAME_RX)
 
         bottle_ext = filename[native_regex, 1]
         bottle_url_ext = f.bottle.url[native_regex, 1]
@@ -27,6 +32,7 @@ module Utils
         bottle_ext && bottle_url_ext && bottle_ext != bottle_url_ext
       end
 
+      sig { returns(Regexp) }
       def native_regex
         /(\.#{Regexp.escape(tag.to_s)}\.bottle\.(\d+\.)?tar\.gz)$/o
       end
@@ -70,7 +76,8 @@ module Utils
       end
     end
 
-    class Bintray
+    # Helper functions for bottles hosted on Bintray.
+    module Bintray
       def self.package(formula_name)
         package_name = formula_name.to_s.dup
         package_name.tr!("+", "x")
@@ -87,18 +94,23 @@ module Utils
       end
     end
 
+    # Collector for bottle specifications.
     class Collector
+      extend T::Sig
+
       extend Forwardable
 
-      def_delegators :@checksums, :keys, :[], :[]=, :key?, :each_key
+      def_delegators :@checksums, :keys, :[], :[]=, :key?, :each_key, :dig
 
+      sig { void }
       def initialize
         @checksums = {}
       end
 
+      sig { params(tag: Symbol).returns(T.nilable([Checksum, Symbol, T.any(Symbol, String)])) }
       def fetch_checksum_for(tag)
         tag = find_matching_tag(tag)
-        return self[tag], tag if tag
+        return self[tag][:checksum], tag, self[tag][:cellar] if tag
       end
 
       private

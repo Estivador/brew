@@ -1,9 +1,11 @@
+# typed: true
 # frozen_string_literal: true
 
-# Formula info drawn from an external `brew info --json` call
-
+# Formula information drawn from an external `brew info --json` call.
+#
+# @api private
 class FormulaInfo
-  # The whole info structure parsed from the JSON
+  # The whole info structure parsed from the JSON.
   attr_accessor :info
 
   def initialize(info)
@@ -15,7 +17,7 @@ class FormulaInfo
   def self.lookup(name)
     json = Utils.popen_read(
       RUBY_PATH,
-      "-W0",
+      ENV["HOMEBREW_RUBY_WARNINGS"],
       "-I", $LOAD_PATH.join(File::PATH_SEPARATOR),
       HOMEBREW_LIBRARY_PATH/"brew.rb",
       "info",

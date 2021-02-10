@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 # Never `require` anything in this file (except English). It needs to be able to
@@ -7,8 +8,8 @@
 require "English"
 
 module Homebrew
-  # Keep in sync with the Gemfile.lock's BUNDLED WITH.
-  HOMEBREW_BUNDLER_VERSION = "1.17.2"
+  # Keep in sync with the `Gemfile.lock`'s BUNDLED WITH.
+  HOMEBREW_BUNDLER_VERSION = "1.17.3"
 
   module_function
 
@@ -16,16 +17,20 @@ module Homebrew
     "#{RbConfig::CONFIG["prefix"]}/bin"
   end
 
+  def gem_user_dir
+    ENV["HOMEBREW_TESTS_GEM_USER_DIR"] || Gem.user_dir
+  end
+
   def gem_user_bindir
     require "rubygems"
-    "#{Gem.user_dir}/bin"
+    "#{gem_user_dir}/bin"
   end
 
   def ohai_if_defined(message)
     if defined?(ohai)
-      ohai message
+      $stderr.ohai message
     else
-      puts "==> #{message}"
+      $stderr.puts "==> #{message}"
     end
   end
 
@@ -39,23 +44,24 @@ module Homebrew
   end
 
   def setup_gem_environment!(gem_home: nil, gem_bindir: nil)
+    require "rubygems"
+
     # Match where our bundler gems are.
     gem_home ||= "#{ENV["HOMEBREW_LIBRARY"]}/Homebrew/vendor/bundle/ruby/#{RbConfig::CONFIG["ruby_version"]}"
     ENV["GEM_HOME"] = gem_home
-    ENV["GEM_PATH"] = ENV["GEM_HOME"]
+    ENV["GEM_PATH"] = "#{ENV["GEM_HOME"]}:#{Gem.default_dir}"
 
     # Set TMPDIR so Xcode's `make` doesn't fall back to `/var/tmp/`,
     # which may be not user-writable.
     ENV["TMPDIR"] = ENV["HOMEBREW_TEMP"]
 
     # Make RubyGems notice environment changes.
-    require "rubygems"
     Gem.clear_paths
     Gem::Specification.reset
 
-    # Add necessary Ruby and Gem binary directories to PATH.
+    # Add necessary Ruby and Gem binary directories to `PATH`.
     gem_bindir ||= Gem.bindir
-    paths = ENV["PATH"].split(":")
+    paths = ENV.fetch("PATH").split(":")
     paths.unshift(gem_bindir) unless paths.include?(gem_bindir)
     paths.unshift(ruby_bindir) unless paths.include?(ruby_bindir)
     ENV["PATH"] = paths.compact.join(":")
@@ -65,12 +71,10 @@ module Homebrew
     setup_gem_environment! if setup_gem_environment
     return unless Gem::Specification.find_all_by_name(name, version).empty?
 
-    # Shell out to `gem` to avoid RubyGems requires for e.g. loading JSON.
     ohai_if_defined "Installing '#{name}' gem"
-    install_args = %W[--no-document #{name}]
-    install_args << "--version" << version if version
-    return if system "#{ruby_bindir}/gem", "install", *install_args
-
+    # document: [] , is equivalent to --no-document
+    Gem.install name, version, document: []
+  rescue Gem::UnsatisfiableDependencyError
     odie_if_defined "failed to install the '#{name}' gem."
   end
 
@@ -85,14 +89,14 @@ module Homebrew
   end
 
   def find_in_path(executable)
-    ENV["PATH"].split(":").find do |path|
-      File.executable?("#{path}/#{executable}")
+    ENV.fetch("PATH").split(":").find do |path|
+      File.executable?(File.join(path, executable))
     end
   end
 
   def install_bundler!
     require "rubygems"
-    setup_gem_environment!(gem_home: Gem.user_dir, gem_bindir: gem_user_bindir)
+    setup_gem_environment!(gem_home: gem_user_dir, gem_bindir: gem_user_bindir)
     install_gem_setup_path!(
       "bundler",
       version:               HOMEBREW_BUNDLER_VERSION,
@@ -104,9 +108,9 @@ module Homebrew
   def install_bundler_gems!
     install_bundler!
 
-    ENV["BUNDLE_GEMFILE"] = "#{ENV["HOMEBREW_LIBRARY"]}/Homebrew/Gemfile"
+    ENV["BUNDLE_GEMFILE"] = File.join(ENV.fetch("HOMEBREW_LIBRARY"), "Homebrew", "Gemfile")
     @bundle_installed ||= begin
-      bundle = "#{find_in_path(:bundle)}/bundle"
+      bundle = File.join(find_in_path("bundle"), "bundle")
       bundle_check_output = `#{bundle} check 2>&1`
       bundle_check_failed = !$CHILD_STATUS.success?
 

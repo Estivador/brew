@@ -1,26 +1,42 @@
+# typed: false
 # frozen_string_literal: true
 
 require "tempfile"
 require "uri"
+require "utils/github/actions"
+require "utils/shell"
 
+# Helper functions for interacting with the GitHub API.
+#
+# @api private
 module GitHub
+  extend T::Sig
+
   module_function
 
   API_URL = "https://api.github.com"
+  API_MAX_PAGES = 50
+  API_MAX_ITEMS = 5000
 
   CREATE_GIST_SCOPES = ["gist"].freeze
   CREATE_ISSUE_FORK_OR_PR_SCOPES = ["public_repo"].freeze
-  ALL_SCOPES = (CREATE_GIST_SCOPES + CREATE_ISSUE_FORK_OR_PR_SCOPES).freeze
+  CREATE_WORKFLOW_SCOPES = ["workflow"].freeze
+  ALL_SCOPES = (CREATE_GIST_SCOPES + CREATE_ISSUE_FORK_OR_PR_SCOPES + CREATE_WORKFLOW_SCOPES).freeze
   ALL_SCOPES_URL = Formatter.url(
     "https://github.com/settings/tokens/new?scopes=#{ALL_SCOPES.join(",")}&description=Homebrew",
   ).freeze
-  PR_ENV_KEY = "HOMEBREW_NEW_FORMULA_PULL_REQUEST_URL"
-  PR_ENV = ENV[PR_ENV_KEY]
+  CREATE_GITHUB_PAT_MESSAGE = <<~EOS
+    Create a GitHub personal access token:
+        #{ALL_SCOPES_URL}
+      #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
+  EOS
 
+  # Generic API error.
   class Error < RuntimeError
     attr_reader :github_message
   end
 
+  # Error when the requested URL is not found.
   class HTTPNotFoundError < Error
     def initialize(github_message)
       @github_message = github_message
@@ -28,14 +44,14 @@ module GitHub
     end
   end
 
+  # Error when the API rate limit is exceeded.
   class RateLimitExceededError < Error
     def initialize(reset, github_message)
       @github_message = github_message
       super <<~EOS
         GitHub API Error: #{github_message}
-        Try again in #{pretty_ratelimit_reset(reset)}, or create a personal access token:
-          #{ALL_SCOPES_URL}
-        #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
+        Try again in #{pretty_ratelimit_reset(reset)}, or:
+        #{CREATE_GITHUB_PAT_MESSAGE}
       EOS
     end
 
@@ -44,6 +60,7 @@ module GitHub
     end
   end
 
+  # Error when authentication fails.
   class AuthenticationFailedError < Error
     def initialize(github_message)
       @github_message = github_message
@@ -58,15 +75,23 @@ module GitHub
           The GitHub credentials in the macOS keychain may be invalid.
           Clear them with:
             printf "protocol=https\\nhost=github.com\\n" | git credential-osxkeychain erase
-          Or create a personal access token:
-            #{ALL_SCOPES_URL}
-          #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
+          #{CREATE_GITHUB_PAT_MESSAGE}
         EOS
       end
       super message.freeze
     end
   end
 
+  # Error when the user has no GitHub API credentials set at all (macOS keychain or envvar).
+  class MissingAuthenticationError < Error
+    def initialize
+      message = +"No GitHub credentials found in macOS Keychain or environment.\n"
+      message << CREATE_GITHUB_PAT_MESSAGE
+      super message
+    end
+  end
+
+  # Error when the API returns a validation error.
   class ValidationFailedError < Error
     def initialize(github_message, errors)
       @github_message = if errors.empty?
@@ -79,13 +104,17 @@ module GitHub
     end
   end
 
-  def env_username_password
-    return unless Homebrew::EnvConfig.github_api_username
-    return unless Homebrew::EnvConfig.github_api_password
+  API_ERRORS = [
+    AuthenticationFailedError,
+    HTTPNotFoundError,
+    RateLimitExceededError,
+    Error,
+    JSON::ParserError,
+  ].freeze
 
-    [Homebrew::EnvConfig.github_api_password, Homebrew::EnvConfig.github_api_username]
-  end
-
+  # Gets the password field from `git-credential-osxkeychain` for github.com,
+  # but only if that password looks like a GitHub Personal Access Token.
+  sig { returns(T.nilable(String)) }
   def keychain_username_password
     github_credentials = Utils.popen(["git", "credential-osxkeychain", "get"], "w+") do |pipe|
       pipe.write "protocol=https\nhost=github.com\n"
@@ -101,7 +130,7 @@ module GitHub
     #   https://github.com/Homebrew/brew/issues/6862#issuecomment-572610344
     return unless /^[a-f0-9]{40}$/i.match?(github_password)
 
-    [github_password, github_username]
+    github_password
   rescue Errno::EPIPE
     # The above invocation via `Utils.popen` can fail, causing the pipe to be
     # prematurely closed (before we can write to it) and thus resulting in a
@@ -112,15 +141,14 @@ module GitHub
 
   def api_credentials
     @api_credentials ||= begin
-      Homebrew::EnvConfig.github_api_token || env_username_password || keychain_username_password
+      Homebrew::EnvConfig.github_api_token || keychain_username_password
     end
   end
 
+  sig { returns(Symbol) }
   def api_credentials_type
     if Homebrew::EnvConfig.github_api_token
       :env_token
-    elsif env_username_password
-      :env_username_password
     elsif keychain_username_password
       :keychain_username_password
     else
@@ -128,59 +156,43 @@ module GitHub
     end
   end
 
+  # Given an API response from GitHub, warn the user if their credentials
+  # have insufficient permissions.
   def api_credentials_error_message(response_headers, needed_scopes)
     return if response_headers.empty?
 
-    @api_credentials_error_message ||= begin
-      unauthorized = (response_headers["http/1.1"] == "401 Unauthorized")
-      scopes = response_headers["x-accepted-oauth-scopes"].to_s.split(", ")
-      if unauthorized && scopes.blank?
-        needed_human_scopes = needed_scopes.join(", ")
-        credentials_scopes = response_headers["x-oauth-scopes"]
-        return if needed_human_scopes.blank? && credentials_scopes.blank?
+    scopes = response_headers["x-accepted-oauth-scopes"].to_s.split(", ")
+    needed_scopes = Set.new(scopes || needed_scopes)
+    credentials_scopes = response_headers["x-oauth-scopes"]
+    return if needed_scopes.subset?(Set.new(credentials_scopes.to_s.split(", ")))
 
-        needed_human_scopes = "none" if needed_human_scopes.blank?
-        credentials_scopes = "none" if credentials_scopes.blank?
+    needed_scopes = needed_scopes.to_a.join(", ").presence || "none"
+    credentials_scopes = "none" if credentials_scopes.blank?
 
-        case GitHub.api_credentials_type
-        when :keychain_username_password
-          onoe <<~EOS
-            Your macOS keychain GitHub credentials do not have sufficient scope!
-            Scopes they need: #{needed_human_scopes}
-            Scopes they have: #{credentials_scopes}
-            Create a personal access token:
-              #{ALL_SCOPES_URL}
-            #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
-          EOS
-        when :env_token
-          onoe <<~EOS
-            Your HOMEBREW_GITHUB_API_TOKEN does not have sufficient scope!
-            Scopes it needs: #{needed_human_scopes}
-              Scopes it has: #{credentials_scopes}
-            Create a new personal access token:
-              #{ALL_SCOPES_URL}
-            #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
-          EOS
-        end
-      end
-      true
+    what = case api_credentials_type
+    when :keychain_username_password
+      "macOS keychain GitHub"
+    when :env_token
+      "HOMEBREW_GITHUB_API_TOKEN"
     end
+
+    @api_credentials_error_message ||= onoe <<~EOS
+      Your #{what} credentials do not have sufficient scope!
+      Scopes required: #{needed_scopes}
+      Scopes present:  #{credentials_scopes}
+      #{CREATE_GITHUB_PAT_MESSAGE}
+    EOS
   end
 
-  def open_api(url, data: nil, request_method: nil, scopes: [].freeze, parse_json: true)
+  def open_api(url, data: nil, data_binary_path: nil, request_method: nil, scopes: [].freeze, parse_json: true)
     # This is a no-op if the user is opting out of using the GitHub API.
     return block_given? ? yield({}) : {} if Homebrew::EnvConfig.no_github_api?
 
     args = ["--header", "Accept: application/vnd.github.v3+json", "--write-out", "\n%\{http_code}"]
     args += ["--header", "Accept: application/vnd.github.antiope-preview+json"]
 
-    token, username = api_credentials
-    case api_credentials_type
-    when :env_username_password, :keychain_username_password
-      args += ["--user", "#{username}:#{token}"]
-    when :env_token
-      args += ["--header", "Authorization: token #{token}"]
-    end
+    token = api_credentials
+    args += ["--header", "Authorization: token #{token}"] unless api_credentials_type == :none
 
     data_tmpfile = nil
     if data
@@ -190,6 +202,11 @@ module GitHub
       rescue JSON::ParserError => e
         raise Error, "Failed to parse JSON request:\n#{e.message}\n#{data}", e.backtrace
       end
+    end
+
+    if data_binary_path.present?
+      args += ["--data-binary", "@#{data_binary_path}"]
+      args += ["--header", "Content-Type: application/gzip"]
     end
 
     headers_tmpfile = Tempfile.new("github_api_headers", HOMEBREW_TEMP)
@@ -233,6 +250,15 @@ module GitHub
     end
   end
 
+  def open_graphql(query, scopes: [].freeze)
+    data = { query: query }
+    result = open_api("https://api.github.com/graphql", scopes: scopes, data: data, request_method: "POST")
+
+    raise Error, result["errors"].map { |e| "#{e["type"]}: #{e["message"]}" }.join("\n") if result["errors"].present?
+
+    result["data"]
+  end
+
   def raise_api_error(output, errors, http_code, headers, scopes)
     json = begin
       JSON.parse(output)
@@ -255,12 +281,14 @@ module GitHub
       raise RateLimitExceededError.new(reset, message)
     end
 
-    GitHub.api_credentials_error_message(meta, scopes)
+    api_credentials_error_message(meta, scopes)
 
     case http_code
     when "401", "403"
       raise AuthenticationFailedError, message
     when "404"
+      raise MissingAuthenticationError if api_credentials_type == :none && scopes.present?
+
       raise HTTPNotFoundError, message
     when "422"
       errors = json&.[]("errors") || []
@@ -292,13 +320,18 @@ module GitHub
   end
 
   def search_code(**qualifiers)
-    search("code", **qualifiers)
+    matches = search("code", **qualifiers)
+    return matches if matches.blank?
+
+    matches.map do |match|
+      # .sub workaround for GitHub returning preceding /
+      match["path"] = match["path"].delete_prefix("/")
+      match
+    end
   end
 
-  def issues_for_formula(name, options = {})
-    tap = options[:tap] || CoreTap.instance
-    tap_full_name = options[:tap_full_name] || tap.full_name
-    search_issues(name, state: "open", repo: tap_full_name, in: "title")
+  def issues_for_formula(name, tap: CoreTap.instance, tap_full_name: tap.full_name, state: nil)
+    search_issues(name, repo: tap_full_name, state: state, in: "title")
   end
 
   def user
@@ -326,19 +359,27 @@ module GitHub
     open_api(url, data: data, request_method: :PUT, scopes: CREATE_ISSUE_FORK_OR_PR_SCOPES)
   end
 
-  def print_pull_requests_matching(query)
-    open_or_closed_prs = search_issues(query, type: "pr", user: "Homebrew")
+  def print_pull_requests_matching(query, only = nil)
+    open_or_closed_prs = search_issues(query, is: only, type: "pr", user: "Homebrew")
 
-    open_prs = open_or_closed_prs.select { |i| i["state"] == "open" }
-    prs = if !open_prs.empty?
-      puts "Open pull requests:"
-      open_prs
-    else
-      puts "Closed pull requests:" unless open_or_closed_prs.empty?
-      open_or_closed_prs.take(20)
+    open_prs, closed_prs = open_or_closed_prs.partition { |pr| pr["state"] == "open" }
+                                             .map { |prs| prs.map { |pr| "#{pr["title"]} (#{pr["html_url"]})" } }
+
+    if open_prs.present?
+      ohai "Open pull requests"
+      open_prs.each { |pr| puts pr }
     end
 
-    prs.each { |i| puts "#{i["title"]} (#{i["html_url"]})" }
+    if closed_prs.present?
+      puts if open_prs.present?
+
+      ohai "Closed pull requests"
+      closed_prs.take(20).each { |pr| puts pr }
+
+      puts "..." if closed_prs.count > 20
+    end
+
+    puts "No pull requests found for #{query.inspect}" if open_prs.blank? && closed_prs.blank?
   end
 
   def create_fork(repo)
@@ -351,12 +392,7 @@ module GitHub
   def check_fork_exists(repo)
     _, reponame = repo.split("/")
 
-    case api_credentials_type
-    when :env_username_password, :keychain_username_password
-      _, username = api_credentials
-    when :env_token
-      username = open_api(url_to("user")) { |json| json["login"] }
-    end
+    username = open_api(url_to("user")) { |json| json["login"] }
     json = open_api(url_to("repos", username, reponame))
 
     return false if json["message"] == "Not Found"
@@ -396,35 +432,45 @@ module GitHub
     open_api(uri) { |json| json.fetch("items", []) }
   end
 
-  def create_issue_comment(body)
-    return false unless PR_ENV
+  def approved_reviews(user, repo, pr, commit: nil)
+    query = <<~EOS
+      { repository(name: "#{repo}", owner: "#{user}") {
+          pullRequest(number: #{pr}) {
+            reviews(states: APPROVED, first: 100) {
+              nodes {
+                author {
+                  ... on User { email login name databaseId }
+                  ... on Organization { email login name databaseId }
+                }
+                authorAssociation
+                commit { oid }
+              }
+            }
+          }
+        }
+      }
+    EOS
 
-    _, user, repo, pr = *PR_ENV.match(HOMEBREW_PULL_OR_COMMIT_URL_REGEX)
-    if !user || !repo || !pr
-      opoo <<-EOS.undent
-        #{PR_ENV_KEY} set but regex matched:
-        user: #{user.inspect}, repo: #{repo.inspect}, pr: #{pr.inspect}
-      EOS
-      return false
-    end
+    result = open_graphql(query, scopes: ["user:email"])
+    reviews = result["repository"]["pullRequest"]["reviews"]["nodes"]
 
-    url = "#{API_URL}/repos/#{user}/#{repo}/issues/#{pr}/comments"
-    data = { "body" => body }
-    if issue_comment_exists?(user, repo, pr, body)
-      ohai "Skipping: identical comment exists on #{PR_ENV}"
-      return true
-    end
+    valid_associations = %w[MEMBER OWNER]
+    reviews.map do |r|
+      next if commit.present? && commit != r["commit"]["oid"]
+      next unless valid_associations.include? r["authorAssociation"]
 
-    scopes = CREATE_ISSUE_FORK_OR_PR_SCOPES
-    open_api(url, data: data, scopes: scopes)
-  end
+      email = r["author"]["email"].presence ||
+              "#{r["author"]["databaseId"]}+#{r["author"]["login"]}@users.noreply.github.com"
 
-  def issue_comment_exists?(user, repo, pr, body)
-    url = "#{API_URL}/repos/#{user}/#{repo}/issues/#{pr}/comments"
-    comments = open_api(url)
-    return unless comments
+      name = r["author"]["name"].presence ||
+             r["author"]["login"]
 
-    comments.any? { |comment| comment["body"].eql?(body) }
+      {
+        "email" => email,
+        "name"  => name,
+        "login" => r["author"]["login"],
+      }
+    end.compact
   end
 
   def dispatch_event(user, repo, event, **payload)
@@ -434,18 +480,64 @@ module GitHub
                   scopes:         CREATE_ISSUE_FORK_OR_PR_SCOPES)
   end
 
-  def get_artifact_url(user, repo, pr, workflow_id: "tests.yml", artifact_name: "bottles")
+  def workflow_dispatch_event(user, repo, workflow, ref, **inputs)
+    url = "#{API_URL}/repos/#{user}/#{repo}/actions/workflows/#{workflow}/dispatches"
+    open_api(url, data:           { ref: ref, inputs: inputs },
+                  request_method: :POST,
+                  scopes:         CREATE_ISSUE_FORK_OR_PR_SCOPES)
+  end
+
+  def get_release(user, repo, tag)
+    url = "#{API_URL}/repos/#{user}/#{repo}/releases/tags/#{tag}"
+    open_api(url, request_method: :GET)
+  end
+
+  def get_latest_release(user, repo)
+    url = "#{API_URL}/repos/#{user}/#{repo}/releases/latest"
+    open_api(url, request_method: :GET)
+  end
+
+  def create_or_update_release(user, repo, tag, id: nil, name: nil, body: nil, draft: false)
+    url = "#{API_URL}/repos/#{user}/#{repo}/releases"
+    method = if id
+      url += "/#{id}"
+      :PATCH
+    else
+      :POST
+    end
+    data = {
+      tag_name: tag,
+      name:     name || tag,
+      draft:    draft,
+    }
+    data[:body] = body if body.present?
+    open_api(url, data: data, request_method: method, scopes: CREATE_ISSUE_FORK_OR_PR_SCOPES)
+  end
+
+  def upload_release_asset(user, repo, id, local_file: nil, remote_file: nil)
+    url = "https://uploads.github.com/repos/#{user}/#{repo}/releases/#{id}/assets"
+    url += "?name=#{remote_file}" if remote_file
+    open_api(url, data_binary_path: local_file, request_method: :POST, scopes: CREATE_ISSUE_FORK_OR_PR_SCOPES)
+  end
+
+  def get_workflow_run(user, repo, pr, workflow_id: "tests.yml", artifact_name: "bottles")
     scopes = CREATE_ISSUE_FORK_OR_PR_SCOPES
     base_url = "#{API_URL}/repos/#{user}/#{repo}"
     pr_payload = open_api("#{base_url}/pulls/#{pr}", scopes: scopes)
     pr_sha = pr_payload["head"]["sha"]
     pr_branch = URI.encode_www_form_component(pr_payload["head"]["ref"])
+    parameters = "event=pull_request&branch=#{pr_branch}"
 
-    workflow = open_api("#{base_url}/actions/workflows/#{workflow_id}/runs?branch=#{pr_branch}", scopes: scopes)
+    workflow = open_api("#{base_url}/actions/workflows/#{workflow_id}/runs?#{parameters}", scopes: scopes)
     workflow_run = workflow["workflow_runs"].select do |run|
       run["head_sha"] == pr_sha
     end
 
+    [workflow_run, pr_sha, pr_branch, pr, workflow_id, scopes, artifact_name]
+  end
+
+  def get_artifact_url(workflow_array)
+    workflow_run, pr_sha, pr_branch, pr, workflow_id, scopes, artifact_name = *workflow_array
     if workflow_run.empty?
       raise Error, <<~EOS
         No matching workflow run found for these criteria!
@@ -480,21 +572,63 @@ module GitHub
     artifact.first["archive_download_url"]
   end
 
+  def public_member_usernames(org, per_page: 100)
+    url = "#{API_URL}/orgs/#{org}/public_members?per_page=#{per_page}"
+    members = []
+
+    (1..API_MAX_PAGES).each do |page|
+      result = open_api("#{url}&page=#{page}").map { |member| member["login"] }
+      members.concat(result)
+
+      return members if result.length < per_page
+    end
+  end
+
+  def members_by_team(org, team)
+    query = <<~EOS
+        { organization(login: "#{org}") {
+          teams(first: 100) {
+            nodes {
+              ... on Team { name }
+            }
+          }
+          team(slug: "#{team}") {
+            members(first: 100) {
+              nodes {
+                ... on User { login name }
+              }
+            }
+          }
+        }
+      }
+    EOS
+    result = open_graphql(query, scopes: ["read:org", "user"])
+
+    if result["organization"]["teams"]["nodes"].blank?
+      raise Error,
+            "Your token needs the 'read:org' scope to access this API"
+    end
+    raise Error, "The team #{org}/#{team} does not exist" if result["organization"]["team"].blank?
+
+    result["organization"]["team"]["members"]["nodes"].map { |member| [member["login"], member["name"]] }.to_h
+  end
+
   def sponsors_by_tier(user)
-    url = "https://api.github.com/graphql"
-    data = {
-      query: <<~EOS,
-          {
-            organization(login: "#{user}") {
-              sponsorsListing {
-                tiers(first: 100) {
-                  nodes {
-                    monthlyPriceInDollars
-                    adminInfo {
-                    sponsorships(first: 100) {
-                      totalCount
-                      nodes {
-                        sponsor { login }
+    query = <<~EOS
+        { organization(login: "#{user}") {
+          sponsorsListing {
+            tiers(first: 10, orderBy: {field: MONTHLY_PRICE_IN_CENTS, direction: DESC}) {
+              nodes {
+                monthlyPriceInDollars
+                adminInfo {
+                  sponsorships(first: 100, includePrivate: true) {
+                    totalCount
+                    nodes {
+                      privacyLevel
+                      sponsorEntity {
+                        __typename
+                        ... on Organization { login name }
+                        ... on User { login name }
                       }
                     }
                   }
@@ -503,13 +637,212 @@ module GitHub
             }
           }
         }
-      EOS
-    }
-    open_api(url, scopes: ["admin:org", "user"], data: data, request_method: "POST")
+      }
+    EOS
+    result = open_graphql(query, scopes: ["admin:org", "user"])
+
+    tiers = result["organization"]["sponsorsListing"]["tiers"]["nodes"]
+
+    tiers.map do |t|
+      tier = t["monthlyPriceInDollars"]
+      raise Error, "Your token needs the 'admin:org' scope to access this API" if t["adminInfo"].nil?
+
+      sponsorships = t["adminInfo"]["sponsorships"]
+      count = sponsorships["totalCount"]
+      sponsors = sponsorships["nodes"].map do |sponsor|
+        next unless sponsor["privacyLevel"] == "PUBLIC"
+
+        se = sponsor["sponsorEntity"]
+        {
+          "name"  => se["name"].presence || sponsor["login"],
+          "login" => se["login"],
+          "type"  => se["__typename"].downcase,
+        }
+      end.compact
+
+      {
+        "tier"     => tier,
+        "count"    => count,
+        "sponsors" => sponsors,
+      }
+    end.compact
   end
 
-  def api_errors
-    [GitHub::AuthenticationFailedError, GitHub::HTTPNotFoundError,
-     GitHub::RateLimitExceededError, GitHub::Error, JSON::ParserError].freeze
+  def get_repo_license(user, repo)
+    response = open_api("#{API_URL}/repos/#{user}/#{repo}/license")
+    return unless response.key?("license")
+
+    response["license"]["spdx_id"]
+  rescue HTTPNotFoundError
+    nil
+  end
+
+  def fetch_pull_requests(name, tap_full_name, state: nil, version: nil)
+    if version.present?
+      query = "#{name} #{version}"
+      regex = /(^|\s)#{Regexp.quote(name)}(:|,|\s)(.*\s)?#{Regexp.quote(version)}(:|,|\s|$)/i
+    else
+      query = name
+      regex = /(^|\s)#{Regexp.quote(name)}(:|,|\s|$)/i
+    end
+    issues_for_formula(query, tap_full_name: tap_full_name, state: state).select do |pr|
+      pr["html_url"].include?("/pull/") && regex.match?(pr["title"])
+    end
+  rescue RateLimitExceededError => e
+    opoo e.message
+    []
+  end
+
+  def check_for_duplicate_pull_requests(name, tap_full_name, state:, file:, args:, version: nil)
+    pull_requests = fetch_pull_requests(name, tap_full_name, state: state, version: version).select do |pr|
+      pr_files = open_api(url_to("repos", tap_full_name, "pulls", pr["number"], "files"))
+      pr_files.any? { |f| f["filename"] == file }
+    end
+    return if pull_requests.blank?
+
+    duplicates_message = <<~EOS
+      These pull requests may be duplicates:
+      #{pull_requests.map { |pr| "#{pr["title"]} #{pr["html_url"]}" }.join("\n")}
+    EOS
+    error_message = "Duplicate PRs should not be opened. Use --force to override this error."
+    if args.force? && !args.quiet?
+      opoo duplicates_message
+    elsif !args.force? && args.quiet?
+      odie error_message
+    elsif !args.force?
+      odie <<~EOS
+        #{duplicates_message.chomp}
+        #{error_message}
+      EOS
+    end
+  end
+
+  def forked_repo_info!(tap_full_name)
+    response = create_fork(tap_full_name)
+    # GitHub API responds immediately but fork takes a few seconds to be ready.
+    sleep 1 until check_fork_exists(tap_full_name)
+    remote_url = if system("git", "config", "--local", "--get-regexp", "remote\..*\.url", "git@github.com:.*")
+      response.fetch("ssh_url")
+    else
+      url = response.fetch("clone_url")
+      if (api_token = Homebrew::EnvConfig.github_api_token)
+        url.gsub!(%r{^https://github\.com/}, "https://#{api_token}@github.com/")
+      end
+      url
+    end
+    username = response.fetch("owner").fetch("login")
+    [remote_url, username]
+  end
+
+  def create_bump_pr(info, args:)
+    tap = info[:tap]
+    sourcefile_path = info[:sourcefile_path]
+    old_contents = info[:old_contents]
+    additional_files = info[:additional_files] || []
+    remote = info[:remote] || "origin"
+    remote_branch = info[:remote_branch] || tap.path.git_origin_branch
+    branch = info[:branch_name]
+    commit_message = info[:commit_message]
+    previous_branch = info[:previous_branch] || "-"
+    tap_full_name = info[:tap_full_name] || tap.full_name
+    pr_message = info[:pr_message]
+
+    sourcefile_path.parent.cd do
+      git_dir = Utils.popen_read("git rev-parse --git-dir").chomp
+      shallow = !git_dir.empty? && File.exist?("#{git_dir}/shallow")
+      changed_files = [sourcefile_path]
+      changed_files += additional_files if additional_files.present?
+
+      if args.dry_run? || (args.write? && !args.commit?)
+        ohai "try to fork repository with GitHub API" unless args.no_fork?
+        ohai "git fetch --unshallow origin" if shallow
+        ohai "git add #{changed_files.join(" ")}"
+        ohai "git checkout --no-track -b #{branch} #{remote}/#{remote_branch}"
+        ohai "git commit --no-edit --verbose --message='#{commit_message}'" \
+             " -- #{changed_files.join(" ")}"
+        ohai "git push --set-upstream $HUB_REMOTE #{branch}:#{branch}"
+        ohai "git checkout --quiet #{previous_branch}"
+        ohai "create pull request with GitHub API (base branch: #{remote_branch})"
+      else
+
+        unless args.commit?
+          if args.no_fork?
+            remote_url = Utils.popen_read("git remote get-url --push origin").chomp
+            username = tap.user
+          else
+            begin
+              remote_url, username = forked_repo_info!(tap_full_name)
+            rescue *API_ERRORS => e
+              sourcefile_path.atomic_write(old_contents)
+              odie "Unable to fork: #{e.message}!"
+            end
+          end
+
+          safe_system "git", "fetch", "--unshallow", "origin" if shallow
+        end
+
+        safe_system "git", "add", *changed_files
+        safe_system "git", "checkout", "--no-track", "-b", branch, "#{remote}/#{remote_branch}" unless args.commit?
+        safe_system "git", "commit", "--no-edit", "--verbose",
+                    "--message=#{commit_message}",
+                    "--", *changed_files
+        return if args.commit?
+
+        safe_system "git", "push", "--set-upstream", remote_url, "#{branch}:#{branch}"
+        safe_system "git", "checkout", "--quiet", previous_branch
+        pr_message = <<~EOS
+          #{pr_message}
+        EOS
+        user_message = args.message
+        if user_message
+          pr_message = <<~EOS
+            #{user_message}
+
+            ---
+
+            #{pr_message}
+          EOS
+        end
+
+        begin
+          url = create_pull_request(tap_full_name, commit_message,
+                                    "#{username}:#{branch}", remote_branch, pr_message)["html_url"]
+          if args.no_browse?
+            puts url
+          else
+            exec_browser url
+          end
+        rescue *API_ERRORS => e
+          odie "Unable to open pull request: #{e.message}!"
+        end
+      end
+    end
+  end
+
+  def pull_request_commits(user, repo, pr, per_page: 100)
+    pr_data = open_api(url_to("repos", user, repo, "pulls", pr))
+    commits_api = pr_data["commits_url"]
+    commit_count = pr_data["commits"]
+    commits = []
+
+    if commit_count > API_MAX_ITEMS
+      raise Error, "Getting #{commit_count} commits would exceed limit of #{API_MAX_ITEMS} API items!"
+    end
+
+    (1..API_MAX_PAGES).each do |page|
+      result = open_api(commits_api + "?per_page=#{per_page}&page=#{page}")
+      commits.concat(result.map { |c| c["sha"] })
+
+      return commits if commits.length == commit_count
+
+      if result.empty? || page * per_page >= commit_count
+        raise Error, "Expected #{commit_count} commits but actually got #{commits.length}!"
+      end
+    end
+  end
+
+  def pull_request_labels(user, repo, pr)
+    pr_data = open_api(url_to("repos", user, repo, "pulls", pr))
+    pr_data["labels"].map { |label| label["name"] }
   end
 end

@@ -1,18 +1,25 @@
+# typed: false
 # frozen_string_literal: true
 
 require "bintray"
 
 describe Bintray, :needs_network do
-  bintray = described_class.new(user: "BrewTestBot", key: "deadbeef", org: "homebrew")
-  describe "::file_published?" do
+  subject(:bintray) { described_class.new(org: "homebrew") }
+
+  before do
+    ENV["HOMEBREW_BINTRAY_USER"] = "BrewTestBot"
+    ENV["HOMEBREW_BINTRAY_KEY"] = "deadbeef"
+  end
+
+  describe "::remote_checksum" do
     it "detects a published file" do
-      results = bintray.file_published?(repo: "bottles", remote_file: "hello-2.10.catalina.bottle.tar.gz")
-      expect(results).to be true
+      hash = bintray.remote_checksum(repo: "bottles", remote_file: "hello-2.10.catalina.bottle.tar.gz")
+      expect(hash).to eq("449de5ea35d0e9431f367f1bb34392e450f6853cdccdc6bd04e6ad6471904ddb")
     end
 
-    it "fails on a non-existant file" do
-      results = bintray.file_published?(repo: "bottles", remote_file: "my-fake-bottle-1.0.snow_hyena.tar.gz")
-      expect(results).to be false
+    it "fails on a non-existent file" do
+      hash = bintray.remote_checksum(repo: "bottles", remote_file: "my-fake-bottle-1.0.snow_hyena.tar.gz")
+      expect(hash).to be nil
     end
   end
 

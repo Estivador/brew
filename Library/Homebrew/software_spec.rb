@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 require "resource"
@@ -11,37 +12,37 @@ require "patch"
 require "compilers"
 require "global"
 require "os/mac/version"
+require "extend/on_os"
 
 class SoftwareSpec
+  extend T::Sig
+
   extend Forwardable
+  include OnOS
 
   PREDEFINED_OPTIONS = {
     universal: Option.new("universal", "Build a universal binary"),
     cxx11:     Option.new("c++11",     "Build using C++11 mode"),
   }.freeze
 
-  attr_reader :name, :full_name, :owner
-  attr_reader :build, :resources, :patches, :options
-  attr_reader :deprecated_flags, :deprecated_options
-  attr_reader :dependency_collector
-  attr_reader :bottle_specification
-  attr_reader :compiler_failures
-  attr_reader :uses_from_macos_elements
+  attr_reader :name, :full_name, :owner, :build, :resources, :patches, :options, :deprecated_flags,
+              :deprecated_options, :dependency_collector, :bottle_specification, :compiler_failures,
+              :uses_from_macos_elements, :bottle_disable_reason
 
-  def_delegators :@resource, :stage, :fetch, :verify_download_integrity, :source_modified_time
-  def_delegators :@resource, :download_name, :cached_download, :clear_cache
-  def_delegators :@resource, :checksum, :mirrors, :specs, :using
-  def_delegators :@resource, :version, :mirror, *Checksum::TYPES
-  def_delegators :@resource, :downloader
+  def_delegators :@resource, :stage, :fetch, :verify_download_integrity, :source_modified_time, :download_name,
+                 :cached_download, :clear_cache, :checksum, :mirrors, :specs, :using, :version, :mirror,
+                 :downloader
 
-  def initialize
+  def_delegators :@resource, :sha256
+
+  def initialize(flags: [])
     @resource = Resource.new
     @resources = {}
     @dependency_collector = DependencyCollector.new
     @bottle_specification = BottleSpecification.new
     @patches = []
     @options = Options.new
-    @flags = ARGV.flags_only
+    @flags = flags
     @deprecated_flags = []
     @deprecated_options = []
     @build = BuildOptions.new(Options.create(@flags), options)
@@ -83,19 +84,22 @@ class SoftwareSpec
     @bottle_disable_reason.unneeded?
   end
 
+  sig { returns(T::Boolean) }
   def bottle_disabled?
     @bottle_disable_reason ? true : false
   end
-
-  attr_reader :bottle_disable_reason
 
   def bottle_defined?
     !bottle_specification.collector.keys.empty?
   end
 
+  def bottle_tag?
+    bottle_specification.tag?(Utils::Bottles.tag)
+  end
+
   def bottled?
-    bottle_specification.tag?(Utils::Bottles.tag) && \
-      (bottle_specification.compatible_cellar? || Homebrew.args.force_bottle?)
+    bottle_tag? && \
+      (bottle_specification.compatible_locations? || owner.force_bottle)
   end
 
   def bottle(disable_type = nil, disable_reason = nil, &block)
@@ -111,10 +115,12 @@ class SoftwareSpec
   end
 
   def resource(name, klass = Resource, &block)
-    if block_given?
+    if block
       raise DuplicateResourceError, name if resource_defined?(name)
 
       res = klass.new(name, &block)
+      return unless res.url
+
       resources[name] = res
       dependency_collector.add(res)
     else
@@ -221,12 +227,6 @@ class SoftwareSpec
     end
   end
 
-  def add_legacy_patches(list)
-    list = Patch.normalize_legacy_patches(list)
-    list.each { |p| p.owner = self }
-    patches.concat(list)
-  end
-
   def add_dep_option(dep)
     dep.option_names.each do |name|
       if dep.optional? && !option_defined?("with-#{name}")
@@ -239,18 +239,20 @@ class SoftwareSpec
 end
 
 class HeadSoftwareSpec < SoftwareSpec
-  def initialize
+  def initialize(flags: [])
     super
     @resource.version = Version.create("HEAD")
   end
 
   def verify_download_integrity(_fn)
-    nil
+    # no-op
   end
 end
 
 class Bottle
   class Filename
+    extend T::Sig
+
     attr_reader :name, :version, :tag, :rebuild
 
     def self.create(formula, tag, rebuild)
@@ -264,19 +266,22 @@ class Bottle
       @rebuild = rebuild
     end
 
+    sig { returns(String) }
     def to_s
       "#{name}--#{version}#{extname}"
     end
     alias to_str to_s
 
+    sig { returns(String) }
     def json
       "#{name}--#{version}.#{tag}.bottle.json"
     end
 
     def bintray
-      "#{name}-#{version}#{extname}"
+      ERB::Util.url_encode("#{name}-#{version}#{extname}")
     end
 
+    sig { returns(String) }
     def extname
       s = rebuild.positive? ? ".#{rebuild}" : ""
       ".#{tag}.bottle#{s}.tar.gz"
@@ -297,7 +302,7 @@ class Bottle
     @resource.specs[:bottle] = true
     @spec = spec
 
-    checksum, tag = spec.checksum_for(Utils::Bottles.tag)
+    checksum, tag, cellar = spec.checksum_for(Utils::Bottles.tag)
 
     filename = Filename.create(formula, tag, spec.rebuild)
     @resource.url("#{spec.root_url}/#{filename.bintray}",
@@ -305,12 +310,12 @@ class Bottle
     @resource.version = formula.pkg_version
     @resource.checksum = checksum
     @prefix = spec.prefix
-    @cellar = spec.cellar
+    @cellar = cellar
     @rebuild = spec.rebuild
   end
 
-  def compatible_cellar?
-    @spec.compatible_cellar?
+  def compatible_locations?
+    @spec.compatible_locations?
   end
 
   # Does the bottle need to be relocated?
@@ -331,18 +336,29 @@ class Bottle
 end
 
 class BottleSpecification
-  DEFAULT_PREFIX = Homebrew::DEFAULT_PREFIX
+  extend T::Sig
 
-  attr_rw :prefix, :cellar, :rebuild
+  attr_rw :prefix, :rebuild
   attr_accessor :tap
-  attr_reader :checksum, :collector, :root_url_specs
+  attr_reader :all_tags_cellar, :checksum, :collector, :root_url_specs, :repository
 
+  sig { void }
   def initialize
     @rebuild = 0
     @prefix = Homebrew::DEFAULT_PREFIX
-    @cellar = Homebrew::DEFAULT_CELLAR
+    @all_tags_cellar = Homebrew::DEFAULT_CELLAR
+    @repository = Homebrew::DEFAULT_REPOSITORY
     @collector = Utils::Bottles::Collector.new
     @root_url_specs = {}
+  end
+
+  def prefix=(prefix)
+    if [HOMEBREW_DEFAULT_PREFIX,
+        HOMEBREW_MACOS_ARM_DEFAULT_PREFIX,
+        HOMEBREW_LINUX_DEFAULT_PREFIX].exclude?(prefix)
+      odisabled "setting 'prefix' for bottles"
+    end
+    @prefix = prefix
   end
 
   def root_url(var = nil, specs = {})
@@ -354,51 +370,108 @@ class BottleSpecification
     end
   end
 
-  def compatible_cellar?
-    cellar == :any || cellar == :any_skip_relocation || cellar == HOMEBREW_CELLAR.to_s
+  def cellar(val = nil)
+    # TODO: (3.1) uncomment to deprecate the old bottle syntax
+    # if val.present?
+    #   odeprecated(
+    #     "`cellar` in a bottle block",
+    #     "`brew style --fix` on the formula to update the style or use `sha256` with a `cellar:` argument",
+    #   )
+    # end
+
+    return collector.dig(Utils::Bottles.tag, :cellar) || @all_tags_cellar if val.nil?
+
+    @all_tags_cellar = val
   end
 
-  # Does the {Bottle} this BottleSpecification belongs to need to be relocated?
+  def compatible_locations?
+    # this looks like it should check prefix and repository too but to be
+    # `cellar :any` actually requires no references to the cellar, prefix or
+    # repository.
+    return true if [:any, :any_skip_relocation].include?(cellar)
+
+    compatible_cellar = cellar == HOMEBREW_CELLAR.to_s
+    compatible_prefix = prefix == HOMEBREW_PREFIX.to_s
+
+    compatible_cellar && compatible_prefix
+  end
+
+  # Does the {Bottle} this {BottleSpecification} belongs to need to be relocated?
+  sig { returns(T::Boolean) }
   def skip_relocation?
     cellar == :any_skip_relocation
   end
 
+  sig { params(tag: Symbol).returns(T::Boolean) }
   def tag?(tag)
     checksum_for(tag) ? true : false
   end
 
-  # Checksum methods in the DSL's bottle block optionally take
+  # Checksum methods in the DSL's bottle block take
   # a Hash, which indicates the platform the checksum applies on.
-  Checksum::TYPES.each do |cksum|
-    define_method(cksum) do |val|
-      digest, tag = val.shift
-      collector[tag] = Checksum.new(cksum, digest)
+  # Example bottle block syntax:
+  # bottle do
+  #  sha256 cellar: :any_skip_relocation, big_sur: "69489ae397e4645..."
+  #  sha256 cellar: :any, catalina: "449de5ea35d0e94..."
+  # end
+  def sha256(hash)
+    sha256_regex = /^[a-f0-9]{64}$/i
+
+    # find new `sha256 big_sur: "69489ae397e4645..."` format
+    tag, digest = hash.find do |key, value|
+      key.is_a?(Symbol) && value.is_a?(String) && value.match?(sha256_regex)
     end
+
+    if digest && tag
+      # the cellar hash key only exists on the new format
+      cellar = hash[:cellar]
+    else
+      # otherwise, find old `sha256 "69489ae397e4645..." => :big_sur` format
+      digest, tag = hash.find do |key, value|
+        key.is_a?(String) && value.is_a?(Symbol) && key.match?(sha256_regex)
+      end
+
+      # TODO: (3.1) uncomment to deprecate the old bottle syntax
+      # if digest && tag
+      #   odeprecated(
+      #     '`sha256 "digest" => :tag` in a bottle block',
+      #     '`brew style --fix` on the formula to update the style or use `sha256 tag: "digest"`',
+      #   )
+      # end
+    end
+
+    cellar ||= all_tags_cellar
+    collector[tag] = { checksum: Checksum.new(digest), cellar: cellar }
   end
 
+  sig { params(tag: Symbol).returns(T.nilable([Checksum, Symbol, T.any(Symbol, String)])) }
   def checksum_for(tag)
     collector.fetch_checksum_for(tag)
   end
 
   def checksums
     tags = collector.keys.sort_by do |tag|
+      version = OS::Mac::Version.from_symbol(tag)
+      # Give arm64 bottles a higher priority so they are first
+      priority = version.arch == :arm64 ? "2" : "1"
+      "#{priority}.#{version}_#{tag}"
+    rescue MacOSVersionError
       # Sort non-MacOS tags below MacOS tags.
-
-      OS::Mac::Version.from_symbol tag
-    rescue ArgumentError
       "0.#{tag}"
     end
-    checksums = {}
-    tags.reverse_each do |tag|
-      checksum = collector[tag]
-      checksums[checksum.hash_type] ||= []
-      checksums[checksum.hash_type] << { checksum => tag }
+    tags.reverse.map do |tag|
+      {
+        "tag"    => tag,
+        "digest" => collector[tag][:checksum],
+        "cellar" => collector[tag][:cellar],
+      }
     end
-    checksums
   end
 end
 
 class PourBottleCheck
+  include OnOS
+
   def initialize(formula)
     @formula = formula
   end

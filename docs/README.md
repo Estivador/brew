@@ -3,6 +3,7 @@
 ## Users
 
 - [`brew` man-page (command documentation)](Manpage.md)
+- [Homebrew Blog (news on major updates)](https://brew.sh/blog/)
 - [Troubleshooting](Troubleshooting.md)
 - [Installation](Installation.md)
 - [Frequently Asked Questions](FAQ.md)
@@ -25,26 +26,32 @@
 - [Python](Homebrew-and-Python.md)
 - [How To Build Software Outside Homebrew With Homebrew `keg_only` dependencies](How-to-Build-Software-Outside-Homebrew-with-Homebrew-keg-only-Dependencies.md)
 - [Xcode](Xcode.md)
-- [Kickstarter Supporters](Kickstarter-Supporters.md)
 
 - [Creating a Homebrew Issue](Creating-a-Homebrew-Issue.md)
 - [Updating Software in Homebrew](Updating-Software-in-Homebrew.md)
 - [Adding Software to Homebrew](Adding-Software-to-Homebrew.md)
+
+- [Kickstarter Supporters](Kickstarter-Supporters.md)
 
 ## Contributors
 
 - [How To Open A Pull Request (and get it merged)](How-To-Open-a-Homebrew-Pull-Request.md)
 - [Formula Cookbook](Formula-Cookbook.md)
 - [Acceptable Formulae](Acceptable-Formulae.md)
+- [License Guidelines](License-Guidelines.md)
 - [Formulae Versions](Versions.md)
+- [Deprecating, Disabling, and Removing Formulae](Deprecating-Disabling-and-Removing-Formulae.md)
 - [Node for Formula Authors](Node-for-Formula-Authors.md)
 - [Python for Formula Authors](Python-for-Formula-Authors.md)
+- [`brew livecheck`](Brew-Livecheck.md)
 - [Migrating A Formula To A Tap](Migrating-A-Formula-To-A-Tap.md)
 - [Rename A Formula](Rename-A-Formula.md)
 - [Building Against Non-Homebrew Dependencies](Building-Against-Non-Homebrew-Dependencies.md)
 - [How To Create (And Maintain) A Tap](How-to-Create-and-Maintain-a-Tap.md)
 - [Brew Test Bot](Brew-Test-Bot.md)
+- [Diagram Guidelines](Diagram-Guidelines.md)
 - [Prose Style Guidelines](Prose-Style-Guidelines.md)
+- [Type Checking with Sorbet](Typechecking.md)
 
 ## Maintainers
 

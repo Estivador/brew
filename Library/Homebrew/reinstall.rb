@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 require "formula_installer"
@@ -7,7 +8,7 @@ require "messages"
 module Homebrew
   module_function
 
-  def reinstall_formula(f, build_from_source: false)
+  def reinstall_formula(f, args:, build_from_source: false)
     return if args.dry_run?
 
     if f.opt_prefix.directory?
@@ -18,24 +19,35 @@ module Homebrew
       backup keg
     end
 
-    build_options = BuildOptions.new(Options.create(Homebrew.args.flags_only), f.options)
+    build_options = BuildOptions.new(Options.create(args.flags_only), f.options)
     options = build_options.used_options
     options |= f.build.used_options
     options &= f.options
 
-    fi = FormulaInstaller.new(f)
-    fi.options              = options
-    fi.build_bottle         = Homebrew.args.build_bottle?
-    fi.interactive          = Homebrew.args.interactive?
-    fi.git                  = Homebrew.args.git?
-    fi.link_keg           ||= keg_was_linked if keg_had_linked_opt
-    fi.build_from_source    = true if build_from_source
-    if tab
-      fi.build_bottle          ||= tab.built_bottle?
-      fi.installed_as_dependency = tab.installed_as_dependency
-      fi.installed_on_request    = tab.installed_on_request
-    end
+    build_from_source_formulae = args.build_from_source_formulae
+    build_from_source_formulae << f.full_name if build_from_source
+
+    fi = FormulaInstaller.new(
+      f,
+      **{
+        options:                    options,
+        link_keg:                   keg_had_linked_opt ? keg_was_linked : nil,
+        installed_as_dependency:    tab&.installed_as_dependency,
+        installed_on_request:       tab&.installed_on_request,
+        build_bottle:               args.build_bottle? || tab&.built_bottle?,
+        force_bottle:               args.force_bottle?,
+        build_from_source_formulae: build_from_source_formulae,
+        git:                        args.git?,
+        interactive:                args.interactive?,
+        keep_tmp:                   args.keep_tmp?,
+        force:                      args.force?,
+        debug:                      args.debug?,
+        quiet:                      args.quiet?,
+        verbose:                    args.verbose?,
+      }.compact,
+    )
     fi.prelude
+    fi.fetch
 
     oh1 "Reinstalling #{Formatter.identifier(f.full_name)} #{options.to_a.join " "}"
 
@@ -44,7 +56,7 @@ module Homebrew
   rescue FormulaInstallationAlreadyAttemptedError
     nil
   rescue Exception # rubocop:disable Lint/RescueException
-    ignore_interrupts { restore_backup(keg, keg_was_linked) }
+    ignore_interrupts { restore_backup(keg, keg_was_linked, verbose: args.verbose?) }
     raise
   else
     begin
@@ -69,7 +81,7 @@ module Homebrew
     end
   end
 
-  def restore_backup(keg, keg_was_linked)
+  def restore_backup(keg, keg_was_linked, verbose:)
     path = backup_path(keg)
 
     return unless path.directory?
@@ -77,7 +89,7 @@ module Homebrew
     Pathname.new(keg).rmtree if keg.exist?
 
     path.rename keg
-    keg.link if keg_was_linked
+    keg.link(verbose: verbose) if keg_was_linked
   end
 
   def backup_path(path)

@@ -1,12 +1,17 @@
+# typed: true
 # frozen_string_literal: true
 
 module Utils
-  class Bottles
+  module Bottles
     class << self
       undef tag
 
       def tag
-        MacOS.version.to_sym
+        if Hardware::CPU.intel?
+          MacOS.version.to_sym
+        else
+          "#{Hardware::CPU.arch}_#{MacOS.version.to_sym}".to_sym
+        end
       end
     end
 
@@ -30,13 +35,18 @@ module Utils
       def find_older_compatible_tag(tag)
         tag_version = begin
           MacOS::Version.from_symbol(tag)
-        rescue ArgumentError
-          return
+        rescue MacOSVersionError
+          nil
         end
 
+        return if tag_version.blank?
+
         keys.find do |key|
-          MacOS::Version.from_symbol(key) <= tag_version
-        rescue ArgumentError
+          key_version = MacOS::Version.from_symbol(key)
+          next if key_version.arch != tag_version.arch
+
+          key_version <= tag_version
+        rescue MacOSVersionError
           false
         end
       end

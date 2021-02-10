@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 require "os/mac/version"
@@ -7,12 +8,15 @@ require "os/mac/sdk"
 require "os/mac/keg"
 
 module OS
+  # Helper module for querying system information on macOS.
   module Mac
+    extend T::Sig
+
     module_function
 
     # rubocop:disable Naming/ConstantName
     # rubocop:disable Style/MutableConstant
-    ::MacOS = self
+    ::MacOS = OS::Mac
     # rubocop:enable Naming/ConstantName
     # rubocop:enable Style/MutableConstant
 
@@ -21,13 +25,13 @@ module OS
     # This can be compared to numerics, strings, or symbols
     # using the standard Ruby Comparable methods.
     def version
-      @version ||= Version.new(full_version.to_s[/10\.\d+/])
+      @version ||= Version.from_symbol(full_version.to_sym)
     end
 
     # This can be compared to numerics, strings, or symbols
     # using the standard Ruby Comparable methods.
     def full_version
-      @full_version ||= Version.new((ENV["HOMEBREW_MACOS_VERSION"] || ENV["HOMEBREW_OSX_VERSION"]).chomp)
+      @full_version ||= Version.new((ENV["HOMEBREW_MACOS_VERSION"]).chomp)
     end
 
     def full_version=(version)
@@ -35,35 +39,38 @@ module OS
       @version = nil
     end
 
+    sig { returns(::Version) }
     def latest_sdk_version
       # TODO: bump version when new Xcode macOS SDK is released
-      Version.new "10.15"
+      ::Version.new("11.1")
     end
-
-    def latest_stable_version
-      # TODO: bump version when new macOS is released and also update
-      # references in docs/Installation.md and
-      # https://github.com/Homebrew/install/blob/master/install
-      Version.new "10.15"
-    end
+    private :latest_sdk_version
 
     def outdated_release?
       # TODO: bump version when new macOS is released and also update
       # references in docs/Installation.md and
-      # https://github.com/Homebrew/install/blob/master/install
-      version < "10.13"
+      # https://github.com/Homebrew/install/blob/HEAD/install.sh
+      version < "10.14"
     end
 
     def prerelease?
-      version > latest_stable_version
+      # TODO: bump version when new macOS is released or announced
+      # and also update references in docs/Installation.md and
+      # https://github.com/Homebrew/install/blob/HEAD/install.sh
+      version >= "12"
     end
 
     def languages
-      @languages ||= [
-        *ARGV.value("language")&.split(","),
-        *ENV["HOMEBREW_LANGUAGES"]&.split(","),
-        *Open3.capture2("defaults", "read", "-g", "AppleLanguages")[0].scan(/[^ \n"(),]+/),
-      ].uniq
+      return @languages if @languages
+
+      os_langs = Utils.popen_read("defaults", "read", "-g", "AppleLanguages")
+      if os_langs.blank?
+        # User settings don't exist so check the system-wide one.
+        os_langs = Utils.popen_read("defaults", "read", "/Library/Preferences/.GlobalPreferences", "AppleLanguages")
+      end
+      os_langs = os_langs.scan(/[^ \n"(),]+/)
+
+      @languages = os_langs
     end
 
     def language
@@ -74,6 +81,7 @@ module OS
       @active_developer_dir ||= Utils.popen_read("/usr/bin/xcode-select", "-print-path").strip
     end
 
+    sig { returns(T::Boolean) }
     def sdk_root_needed?
       if MacOS::CLT.installed?
         # If there's no CLT SDK, return false
@@ -95,24 +103,33 @@ module OS
     # If no specific SDK is requested, the SDK matching the OS version is returned,
     # if available. Otherwise, the latest SDK is returned.
 
-    def sdk(v = nil)
-      @locator ||= if CLT.installed? && CLT.provides_sdk?
-        CLTSDKLocator.new
+    def sdk_locator
+      if CLT.installed? && CLT.provides_sdk?
+        CLT.sdk_locator
       else
-        XcodeSDKLocator.new
+        Xcode.sdk_locator
       end
-
-      @locator.sdk_if_applicable(v)
     end
 
-    def sdk_for_formula(f, v = nil)
+    def sdk(v = nil)
+      sdk_locator.sdk_if_applicable(v)
+    end
+
+    def sdk_for_formula(f, v = nil, check_only_runtime_requirements: false)
       # If the formula requires Xcode, don't return the CLT SDK
-      return Xcode.sdk if f.requirements.any? { |req| req.is_a? XcodeRequirement }
+      # If check_only_runtime_requirements is true, don't necessarily return the
+      # Xcode SDK if the XcodeRequirement is only a build or test requirment.
+      return Xcode.sdk if f.requirements.any? do |req|
+        next false unless req.is_a? XcodeRequirement
+        next false if check_only_runtime_requirements && req.build? && !req.test?
+
+        true
+      end
 
       sdk(v)
     end
 
-    # Returns the path to an SDK or nil, following the rules set by {.sdk}.
+    # Returns the path to an SDK or nil, following the rules set by {sdk}.
     def sdk_path(v = nil)
       s = sdk(v)
       s&.path
@@ -134,9 +151,9 @@ module OS
 
     # See these issues for some history:
     #
-    # - https://github.com/Homebrew/legacy-homebrew/issues/13
-    # - https://github.com/Homebrew/legacy-homebrew/issues/41
-    # - https://github.com/Homebrew/legacy-homebrew/issues/48
+    # - {https://github.com/Homebrew/legacy-homebrew/issues/13}
+    # - {https://github.com/Homebrew/legacy-homebrew/issues/41}
+    # - {https://github.com/Homebrew/legacy-homebrew/issues/48}
     def macports_or_fink
       paths = []
 
@@ -166,19 +183,11 @@ module OS
       paths.uniq
     end
 
-    def preferred_arch
-      if Hardware::CPU.is_64_bit?
-        Hardware::CPU.arch_64_bit
-      else
-        Hardware::CPU.arch_32_bit
-      end
-    end
-
     def app_with_bundle_id(*ids)
       path = mdfind(*ids)
              .reject { |p| p.include?("/Backups.backupdb/") }
              .first
-      Pathname.new(path) unless path.nil? || path.empty?
+      Pathname.new(path) if path.present?
     end
 
     def mdfind(*ids)
@@ -195,14 +204,6 @@ module OS
 
     def mdfind_query(*ids)
       ids.map! { |id| "kMDItemCFBundleIdentifier == #{id}" }.join(" || ")
-    end
-
-    def tcc_db
-      @tcc_db ||= Pathname.new("/Library/Application Support/com.apple.TCC/TCC.db")
-    end
-
-    def pre_mavericks_accessibility_dotfile
-      @pre_mavericks_accessibility_dotfile ||= Pathname.new("/private/var/db/.AccessibilityAPIEnabled")
     end
   end
 end

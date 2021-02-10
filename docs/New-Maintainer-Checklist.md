@@ -18,8 +18,8 @@ issues, or reviewing user pull requests. You should also be making contributions
 to Homebrew at least once per quarter.
 
 You should watch or regularly check Homebrew/brew and/or
-Homebrew/homebrew-core. Let us know which (or both) so we can grant you commit
-access appropriately.
+Homebrew/homebrew-core and/or Homebrew/homebrew-cask. Let us know which so we 
+can grant you commit access appropriately.
 
 If you're no longer able to perform all of these tasks, please continue to
 contribute to Homebrew, but we will ask you to step down as a maintainer.
@@ -33,9 +33,10 @@ A few requests:
 - In Homebrew/brew, close pull requests using GitHub's "Merge pull request"
   button in "Create a merge commit" mode.
 - In Homebrew/homebrew-core, use `brew pr-publish` to close pull requests
-  that require new bottles or change multiple formulae. If commits need to
-  be amended use `brew pr-pull` instead. Let these commands auto-close
-  issues whenever possible (it may take up to 5 minutes). If in doubt,
+  that require new bottles or change multiple formulae. Note that an approving
+  review on a pull request for an existing formula will trigger this automatically.
+  If commits need to be amended use `brew pr-pull` instead. Let these commands
+  auto-close issues whenever possible (it may take up to 5 minutes). If in doubt,
   check with e.g. Fork.app that you've not accidentally added merge commits.
   If bottles are unnecessary, use GitHub's "Merge pull request" button in
   "Squash and merge" mode for a single formula change.
@@ -60,16 +61,16 @@ If they accept, follow a few steps to get them set up:
 - Ask them to sign in to [Bintray](https://bintray.com) using their GitHub account and they should auto-sync to [Bintray's Homebrew organisation](https://bintray.com/homebrew/organization/edit/members) as a member so they can publish new bottles.
 - Invite them to the [`homebrew-maintainers` private maintainers mailing list](https://lists.sfconservancy.org/mailman/admin/homebrew-maintainers/members/add).
 - Invite them to the [`machomebrew` private maintainers Slack](https://machomebrew.slack.com/admin/invites) (and ensure they've read the [communication guidelines](Maintainer-Guidelines.md#communication)) and ask them to use their real name there (rather than a pseudonym they may use on e.g. GitHub).
-- Invite them to the Homebrew Maintainers Monthly Call on Google calendar.
 - Ask them to disable SMS as a 2FA device or fallback on their GitHub account in favour of using one of the other authentication methods.
 - Ask them to (regularly) review remove any unneeded [GitHub personal access tokens](https://github.com/settings/tokens).
 - Add them to Homebrew/brew's README, run `brew man` and commit the changes.
 - Start the process to [add them as Homebrew members](#members), for formal voting rights and the ability to hold office for Homebrew.
 
-If they are interested in doing system administration work or Homebrew/brew releases:
+If they are interested in doing system administration work:
 
 - Invite them to the [`homebrew-ops` private operations mailing list](https://lists.sfconservancy.org/mailman/admin/homebrew-ops/members/add).
 - Invite them to the [`homebrew` private 1Password](https://homebrew.1password.com/people).
+- Optionally: make them [owners on the Homebrew GitHub organisation](https://github.com/orgs/Homebrew/people) if they need to access organisation-wide settings (like GitHub Actions organisation shared runners).
 
 If they are elected to the Homebrew's [Project Leadership Committee](https://docs.brew.sh/Homebrew-Governance#4-project-leadership-committee):
 
